@@ -1,0 +1,20 @@
+# Секреты
+.env
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# База данных
+data/
+*.db
+*.sqlite
+
+# IDE
+.idea/
+.vscode/
