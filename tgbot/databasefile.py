@@ -109,3 +109,26 @@ async def delete_lead(lead_id: int) -> bool:
     except Exception as e:
         logger.error("Ошибка БД в delete_lead: %s", e, exc_info=True)
         return False
+
+# ============================================================
+# НОВЫЕ ФУНКЦИИ ДЛЯ ВТОРОГО АГЕНТА (АНАЛИТИК)
+# ============================================================
+
+async def get_new_leads() -> list[dict]:
+    """Достает все лиды со статусом 'new' для Аналитика."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM scout_findings WHERE status = 'new'") as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+async def update_lead_status(lead_id: int, status: str) -> bool:
+    """Меняет статус лида (например, на 'approved')."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE scout_findings SET status = ? WHERE id = ?", (status, lead_id))
+            await db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Ошибка БД в update_lead_status: {e}")
+        return False
