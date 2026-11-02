@@ -12,7 +12,7 @@ from configfile import BOT_TOKEN, ADMIN_IDS
 from databasefile import init_db
 from handlersfile import router
 
-# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
+
 os.makedirs("logs", exist_ok=True)
 
 log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
@@ -21,20 +21,20 @@ logging.basicConfig(
     level=logging.INFO,
     format=log_format,
     handlers=[
-        logging.StreamHandler(),  # Вывод в консоль
+        logging.StreamHandler(),  
         RotatingFileHandler(
             "logs/bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-        ),  # Запись в файл (до 15 МБ всего)
+        ),  
     ],
 )
 logger = logging.getLogger(__name__)
 
-# Приглушаем логи сторонних библиотек
+
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
 
-# ========== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ==========
+
 async def global_error_handler(event: types.ErrorEvent):
     logger.error(
         "НЕОБРАБОТАННАЯ ОШИБКА: %s", 
@@ -42,7 +42,6 @@ async def global_error_handler(event: types.ErrorEvent):
         exc_info=event.exception
     )
     
-    # Если упало обновление с сообщением, пытаемся уведомить пользователя
     update = event.update
     if update.message:
         try:
@@ -50,7 +49,6 @@ async def global_error_handler(event: types.ErrorEvent):
         except TelegramAPIError:
             pass
             
-    # Уведомляем админов
     for admin_id in ADMIN_IDS:
         try:
             await event.update.bot.send_message(
@@ -60,7 +58,7 @@ async def global_error_handler(event: types.ErrorEvent):
         except TelegramAPIError:
             pass
 
-    return True  # Говорим aiogram, что ошибка обработана
+    return True  
 
 
 # ========== ЗАПУСК ==========
@@ -73,7 +71,7 @@ async def main():
     
     dp.include_router(router)
     
-    # Регистрируем глобальный обработчик ошибок
+    
     dp.errors.register(global_error_handler)
 
     logger.info("Бот успешно запущен и готов к работе!")
