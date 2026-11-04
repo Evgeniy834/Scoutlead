@@ -5,7 +5,7 @@ import httpx
 import time
 from datetime import datetime
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup 
+from bs4 import BeautifulSoup
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -16,8 +16,9 @@ from keyboardsfile import main_menu_kb, back_kb, lead_actions_kb
 from databasefile import (
     get_or_create_user, save_scout_finding, 
     get_first_lead_id, get_lead_by_id, get_next_lead_id, get_prev_lead_id, delete_lead,
-    get_new_leads, update_lead_status 
+    get_new_leads, update_lead_status
 )
+import state
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -55,7 +56,6 @@ SCOUT_SYSTEM_PROMPT = f"""
 Если не нашел ничего подходящего — верни {{"leads": []}}.
 """
 
-# ПРОМПТ ДЛЯ АНАЛИТИКА 
 ANALYST_SYSTEM_PROMPT = f"""
 Ты — строгий аналитик-верификатор базы данных. Твоя задача — прочитать предоставленный текст страницы и решить, является ли он качественным B2B-лидом, или это мусор.
 
@@ -80,7 +80,7 @@ ANALYST_SYSTEM_PROMPT = f"""
 WELCOME_TEXT = "👋 Привет, <b>{name}</b>!\n\nЯ — бот для мониторинга событий клиентов.\nВыберите действие на клавиатуре ниже:"
 
 # ==========================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ 
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
 def format_lead_card(s: dict) -> str:
@@ -148,9 +148,7 @@ async def _safe_send(bot: Bot, chat_id: int, text: str) -> bool:
         print(f"\n[!!!] ОШИБКА ОТПРАВКИ: {e}\n")
         return False
 
-# <--- НОВАЯ ФУНКЦИЯ ПАРСИНГА СТРАНИЦЫ --->
 async def _fetch_page_text(url: str) -> str:
-    """Скачивает страницу и вытаскивает чистый текст для Аналитика."""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers, verify=False) as client:
@@ -165,7 +163,7 @@ async def _fetch_page_text(url: str) -> str:
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             clean_text = ' '.join(chunk for chunk in chunks if chunk)
-            return clean_text[:5000] 
+            return clean_text[:5000]
     except Exception as e:
         print(f"\n[!!!] ОШИБКА СКАЧИВАНИЯ СТРАНИЦЫ {url}: {e}\n")
         return ""
@@ -239,7 +237,6 @@ async def cb_lead_view(call: CallbackQuery):
         else:
             await call.message.edit_text("📋 <b>Результаты</b>\n\nВсе лиды просмотрены.", reply_markup=back_kb())
 
-
 # ==========================================
 # ЛОГИКА ВТОРОГО АГЕНТА (АНАЛИТИК)
 # ==========================================
@@ -263,7 +260,6 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
         
         logger.info(f"[ANALYST] Проверка лида ID {lead_id} ({company})...")
         
-        # 1. Скачиваем текст страницы
         page_text = await _fetch_page_text(url)
         if not page_text:
             logger.warning(f"[ANALYST] Не удалось прочитать страницу {url}. Удаляем лид.")
@@ -271,11 +267,10 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
             deleted_count += 1
             continue
 
-       
         try:
             response = await asyncio.wait_for(
                 ai_client.chat.completions.create(
-                    model=ROUTERAI_MODEL, 
+                    model=ROUTERAI_MODEL,
                     messages=[
                         {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
                         {"role": "user", "content": f"Текст страницы:\n{page_text}"}
@@ -304,13 +299,11 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
                 
         except Exception as e:
             logger.error(f"[ANALYST] Ошибка при анализе лида {lead_id}: {e}")
-            # Если нейросеть сломалась, оставляем лид в базе, но помечаем как ошибочный
             await update_lead_status(lead_id, "error")
             continue
 
     logger.info(f"[ANALYST] === РАБОТА ЗАВЕРШЕНА. Одобрено: {kept_count}, Удалено: {deleted_count} ===")
     await _safe_send(bot, chat_id, f"✅ <b>Аналитик закончил работу!</b>\nОдобрено: {kept_count}\nУдалено мусора: {deleted_count}")
-
 
 # ==========================================
 # ЗАПУСК СКАУТЕРА И ТРИГГЕР ДЛЯ АНАЛИТИКА
@@ -318,11 +311,11 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
 
 async def run_scout_agent(chat_id: int, bot: Bot):
     logger.info("[SCOUT] Запуск поиска...")
-    last_save_time = time.time() 
+    last_save_time = time.time()
     
     try:
         async def _search_and_save():
-            nonlocal last_save_time 
+            nonlocal last_save_time
             
             try:
                 try:
@@ -406,7 +399,6 @@ async def run_scout_agent(chat_id: int, bot: Bot):
                 logger.error(f"[SCOUT] Ошибка внутри _search_and_save: {e}", exc_info=True)
                 await _safe_send(bot, chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
             
-        # Внешний таймаут на всю операцию (3 минуты)
         await asyncio.wait_for(_search_and_save(), timeout=180.0)
         
     except asyncio.TimeoutError:
@@ -417,7 +409,6 @@ async def run_scout_agent(chat_id: int, bot: Bot):
         logger.error(f"[SCOUT] Критическая ошибка: {e}", exc_info=True)
         await _safe_send(bot, chat_id, "⚠️ Критическая ошибка при поиске.")
     finally:
-
         logger.info("[SCOUT] Ожидание 10 секунд тишины перед запуском Аналитика...")
         await asyncio.sleep(10)
         
@@ -428,12 +419,29 @@ async def run_scout_agent(chat_id: int, bot: Bot):
         else:
             logger.info(f"[SCOUT] С момента последнего сохранения прошло {time_since_last_save:.1f} сек (меньше 10).")
 
-
 @router.callback_query(F.data == "start_search")
 async def cb_start_search(call: CallbackQuery):
     await call.answer("Поиск запущен! Ожидайте...", show_alert=True)
     await call.message.edit_text("🚀 <b>Поиск запущен!</b>\n\nСкаутер ищет лиды, затем Аналитик их проверяет...", reply_markup=back_kb())
     asyncio.create_task(run_scout_agent(call.message.chat.id, call.bot))
+
+# ==========================================
+# КОМАНДА /time
+# ==========================================
+@router.message(Command("time"))
+async def cmd_time(message: Message):
+    if state.next_run_time is None:
+        await message.answer("⏳ Таймер еще не запущен. Бот только стартует...")
+        return
+    now = datetime.now()
+    remaining = state.next_run_time - now
+    if remaining.total_seconds() <= 0:
+        await message.answer("🚀 Бот уже работает или скоро начнет!")
+        return
+    total_seconds = int(remaining.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    await message.answer(f"⏳ До следующего запуска осталось: <b>{hours:02d}:{minutes:02d}:{seconds:02d}</b>")
 
 @router.message()
 async def catch_all_messages(message: Message):
