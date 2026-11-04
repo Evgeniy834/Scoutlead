@@ -13,7 +13,12 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT DEFAULT 'manager',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-
+-- НОВАЯ ТАБЛИЦА ДЛЯ АДМИНОВ
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS scout_findings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     company_name TEXT,
@@ -24,7 +29,6 @@ CREATE TABLE IF NOT EXISTS scout_findings (
     status TEXT DEFAULT 'new',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE TABLE IF NOT EXISTS failed_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     stage TEXT,
@@ -51,9 +55,7 @@ async def get_or_create_user(user_id: int, username: str | None) -> int:
             row = await cur.fetchone()
         if row:
             return row[0]
-        async with db.execute(
-            "INSERT INTO users (user_id, username) VALUES (?, ?)", (user_id, username)
-        ) as cur:
+        async with db.execute("INSERT INTO users (user_id, username) VALUES (?, ?)", (user_id, username)) as cur:
             await db.commit()
             return cur.lastrowid
 
@@ -70,12 +72,10 @@ async def save_scout_finding(company_name: str, event_description: str, source_u
         logger.error("Ошибка БД в save_scout_finding: %s", e, exc_info=True)
         return False
 
-# --- НОВАЯ ЛОГИКА: САМЫЕ СВЕЖИЕ ЛИДЫ ВСЕГДА ПЕРВЫМИ ---
-
+# --- ЛОГИКА ТОЛЬКО ДЛЯ ОДОБРЕННЫХ ЛИДОВ ---
 async def get_first_lead_id() -> int | None:
-    """Берет самый последний (свежий) добавленный лид."""
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id FROM scout_findings ORDER BY id DESC LIMIT 1") as cur:
+        async with db.execute("SELECT id FROM scout_findings WHERE status = 'approved' ORDER BY id DESC LIMIT 1") as cur:
             row = await cur.fetchone()
             return row[0] if row else None
 
@@ -87,16 +87,14 @@ async def get_lead_by_id(lead_id: int) -> dict | None:
             return dict(row) if row else None
 
 async def get_next_lead_id(current_id: int) -> int | None:
-    """Кнопка 'Дальше' (листаем вниз, к старым)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id FROM scout_findings WHERE id < ? ORDER BY id DESC LIMIT 1", (current_id,)) as cur:
+        async with db.execute("SELECT id FROM scout_findings WHERE id < ? AND status = 'approved' ORDER BY id DESC LIMIT 1", (current_id,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else None
 
 async def get_prev_lead_id(current_id: int) -> int | None:
-    """Кнопка 'Назад' (листаем вверх, к новым)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id FROM scout_findings WHERE id > ? ORDER BY id ASC LIMIT 1", (current_id,)) as cur:
+        async with db.execute("SELECT id FROM scout_findings WHERE id > ? AND status = 'approved' ORDER BY id ASC LIMIT 1", (current_id,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else None
 
@@ -110,12 +108,7 @@ async def delete_lead(lead_id: int) -> bool:
         logger.error("Ошибка БД в delete_lead: %s", e, exc_info=True)
         return False
 
-# ============================================================
-# НОВЫЕ ФУНКЦИИ ДЛЯ ВТОРОГО АГЕНТА (АНАЛИТИК)
-# ============================================================
-
 async def get_new_leads() -> list[dict]:
-    """Достает все лиды со статусом 'new' для Аналитика."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM scout_findings WHERE status = 'new'") as cur:
@@ -123,7 +116,6 @@ async def get_new_leads() -> list[dict]:
         return [dict(r) for r in rows]
 
 async def update_lead_status(lead_id: int, status: str) -> bool:
-    """Меняет статус лида (например, на 'approved')."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE scout_findings SET status = ? WHERE id = ?", (status, lead_id))
@@ -132,3 +124,27 @@ async def update_lead_status(lead_id: int, status: str) -> bool:
     except Exception as e:
         logger.error(f"Ошибка БД в update_lead_status: {e}")
         return False
+
+# ==========================================
+# НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С АДМИНАМИ
+# ==========================================
+
+async def is_admin(user_id: int) -> bool:
+    """Проверяет, есть ли пользователь в таблице админов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,)) as cur:
+            return await cur.fetchone() is not None
+
+async def add_admin(user_id: int, username: str | None):
+    """Добавляет пользователя в таблицу админов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)", (user_id, username))
+        await db.commit()
+        logger.info(f"Новый админ добавлен в БД: {user_id} (@{username})")
+
+async def get_all_admin_ids() -> list[int]:
+    """Возвращает список всех ID админов из базы."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM admins") as cur:
+            rows = await cur.fetchall()
+            return [r[0] for r in rows]

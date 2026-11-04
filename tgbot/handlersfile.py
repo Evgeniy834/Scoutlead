@@ -9,14 +9,16 @@ from bs4 import BeautifulSoup
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from openai import AsyncOpenAI
 
-from configfile import BOT_TOKEN, ROUTERAI_API_KEY, ROUTERAI_BASE_URL, ROUTERAI_MODEL
+from configfile import BOT_TOKEN, ROUTERAI_API_KEY, ROUTERAI_BASE_URL, ROUTERAI_MODEL, BOT_PASSWORD
 from keyboardsfile import main_menu_kb, back_kb, lead_actions_kb
 from databasefile import (
     get_or_create_user, save_scout_finding, 
     get_first_lead_id, get_lead_by_id, get_next_lead_id, get_prev_lead_id, delete_lead,
-    get_new_leads, update_lead_status
+    get_new_leads, update_lead_status, is_admin, add_admin, get_all_admin_ids
 )
 import state
 
@@ -31,53 +33,35 @@ TODAY_ISO = TODAY_DATETIME.strftime("%Y-%m-%d")
 
 SCOUT_SYSTEM_PROMPT = f"""
 Ты — профессиональный B2B-разведчик. Твоя задача — найти компании в РФ, которые анонсировали офлайн-события (выставки, форумы, запуски заводов).
-
 КРИТИЧЕСКИЕ ПРАВИЛА:
 1. Ищи ТОЛЬКО на сайтах с доменом .ru, а также в Telegram (t.me) и ВКонтакте (vk.com).
 2. Ссылка должна вести на конкретную новость или пост. Ссылки на общие разделы (/news) ЗАПРЕЩЕНЫ.
-3. Событие должно быть офлайн (выставка, конференция, форум, запуск завода).
-4. Описание события должно быть кратким (до 10 слов).
+3. Событие должно быть офлайн.
+4. Описание события до 10 слов.
 5. СЕГОДНЯ {TODAY_STR} ({TODAY_ISO}). 
-6. ТЕБЕ НУЖНЫ ТОЛЬКО БУДУЩИЕ СОБЫТИЯ. Если событие уже прошло — ПРОПУСКАЙ.
-7. Поле "event_date" строго в формате YYYY-MM-DD (например, 2027-03-15). Если известен только месяц и год, используй 01.
-
+6. ТОЛЬКО БУДУЩИЕ СОБЫТИЯ.
+7. event_date строго YYYY-MM-DD.
 ФОРМАТ ОТВЕТА (строго JSON-объект с ключом "leads"):
-{{
-  "leads": [
-    {{
-      "company_name": "Название",
-      "event_description": "Кратко, что делают",
-      "source_url": "https://...",
-      "source_type": "website / telegram / vk",
-      "event_date": "2027-05-10"
-    }}
-  ]
-}}
-Если не нашел ничего подходящего — верни {{"leads": []}}.
+{{"leads": [{{"company_name": "Название", "event_description": "Кратко", "source_url": "https://...", "source_type": "website", "event_date": "2027-05-10"}}]}}
 """
 
 ANALYST_SYSTEM_PROMPT = f"""
-Ты — строгий аналитик-верификатор базы данных. Твоя задача — прочитать предоставленный текст страницы и решить, является ли он качественным B2B-лидом, или это мусор.
-
-КРИТЕРИИ ДЛЯ ПРИНЯТИЯ РЕШЕНИЯ "KEEP" (оставить):
-1. В тексте явно упоминается анонс офлайн-события (выставка, конференция, форум, открытие завода).
-2. Это не просто новость о выходе отчета или биржевых облигациях.
-3. Дата события (если она есть в тексте) находится в будущем (сегодня {TODAY_ISO}).
-4. Компания является коммерческой организацией РФ.
-
-КРИТЕРИИ ДЛЯ "DELETE" (удалить):
-1. Текст не содержит анонса события (например, это статья о погоде, общие рассуждения, финансовые новости).
-2. Событие уже прошло.
-3. Это новостная перепечатка со стороннего СМИ, а не официальный анонс компании.
-
-ВЕРНИ ОТВЕТ СТРОГО В ФОРМАТЕ JSON:
-{{
-  "verdict": "KEEP" или "DELETE",
-  "reason": "Краткая причина (до 10 слов)"
-}}
+Ты — строгий аналитик-верификатор. Твоя задача — прочитать текст страницы и решить, качественный ли это B2B-лид.
+ОСТАВИТЬ (KEEP), ЕСЛИ:
+1. Есть анонс офлайн-события.
+2. Дата в будущем (сегодня {TODAY_ISO}).
+3. Компания РФ.
+УДАЛИТЬ (DELETE), ЕСЛИ:
+1. Нет анонса.
+2. Событие прошло.
+ВЕРНИ СТРОГО JSON: {{"verdict": "KEEP" или "DELETE", "reason": "Причина до 10 слов"}}
 """
 
 WELCOME_TEXT = "👋 Привет, <b>{name}</b>!\n\nЯ — бот для мониторинга событий клиентов.\nВыберите действие на клавиатуре ниже:"
+
+
+class AuthStates(StatesGroup):
+    waiting_for_password = State()
 
 # ==========================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -101,13 +85,10 @@ async def _is_url_alive(url: str) -> bool:
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
-        
         if not (domain.endswith('.ru') or domain.endswith('.рф') or 't.me' in domain or 'vk.com' in domain):
             return False
-
         if url.endswith(('/news', '/news/', '/PressReleases', '/PressReleases/', '/press-center', '/press-center/')):
             return False
-            
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=True, headers=headers, verify=False) as client:
             response = await client.head(url)
@@ -155,7 +136,6 @@ async def _fetch_page_text(url: str) -> str:
             response = await client.get(url)
             if response.status_code >= 400:
                 return ""
-            
             soup = BeautifulSoup(response.text, 'html.parser')
             for script in soup(["script", "style"]):
                 script.extract()
@@ -169,13 +149,27 @@ async def _fetch_page_text(url: str) -> str:
         return ""
 
 # ==========================================
-# ОСНОВНЫЕ ХЕНДЛЕРЫ
+# ОСНОВНЫЕ ХЕНДЛЕРЫ 
 # ==========================================
 
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     await get_or_create_user(message.from_user.id, message.from_user.username)
-    await message.answer(WELCOME_TEXT.format(name=message.from_user.full_name), reply_markup=main_menu_kb())
+    
+    if await is_admin(message.from_user.id):
+        await message.answer(WELCOME_TEXT.format(name=message.from_user.full_name), reply_markup=main_menu_kb())
+    else:
+        await state.set_state(AuthStates.waiting_for_password)
+        await message.answer("🔒 <b>Доступ ограничен.</b>\n\nВведите пароль для входа:")
+
+@router.message(AuthStates.waiting_for_password)
+async def process_password(message: Message, state: FSMContext):
+    if message.text and message.text.strip() == BOT_PASSWORD:
+        await add_admin(message.from_user.id, message.from_user.username)
+        await state.clear()
+        await message.answer("✅ <b>Пароль верный!</b> Добро пожаловать.", reply_markup=main_menu_kb())
+    else:
+        await message.answer("❌ <b>Неверный пароль.</b> Попробуйте еще раз:")
 
 @router.callback_query(F.data == "manual")
 async def cb_manual(call: CallbackQuery):
@@ -238,16 +232,21 @@ async def cb_lead_view(call: CallbackQuery):
             await call.message.edit_text("📋 <b>Результаты</b>\n\nВсе лиды просмотрены.", reply_markup=back_kb())
 
 # ==========================================
-# ЛОГИКА ВТОРОГО АГЕНТА (АНАЛИТИК)
+# ЛОГИКА ВТОРОГО АГЕНТА 
 # ==========================================
 async def run_analyst_agent(chat_id: int, bot: Bot):
     logger.info("[ANALYST] === ЗАПУСК ВТОРОГО АГЕНТА (АНАЛИТИК) ===")
-    await _safe_send(bot, chat_id, "🧹 <b>Аналитик приступил к работе!</b>\nПроверяем найденные ссылки и чистим мусор...")
+    
+    # Отправляем уведомление всем админам из БД
+    admin_ids = await get_all_admin_ids()
+    for aid in admin_ids:
+        await _safe_send(bot, aid, "🧹 <b>Аналитик приступил к работе!</b>")
     
     leads = await get_new_leads()
     if not leads:
-        logger.info("[ANALYST] Нет новых лидов для проверки.")
-        await _safe_send(bot, chat_id, "🤷‍♂️ Аналитику нечего проверять (база пуста).")
+        logger.info("[ANALYST] Нет новых лидов.")
+        for aid in admin_ids:
+            await _safe_send(bot, aid, "🤷‍♂️ Аналитику нечего проверять.")
         return
 
     kept_count = 0
@@ -262,61 +261,76 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
         
         page_text = await _fetch_page_text(url)
         if not page_text:
-            logger.warning(f"[ANALYST] Не удалось прочитать страницу {url}. Удаляем лид.")
+            logger.warning(f"[ANALYST] Не удалось прочитать страницу {url}. Удаляем.")
             await delete_lead(lead_id)
             deleted_count += 1
             continue
 
-        try:
-            response = await asyncio.wait_for(
-                ai_client.chat.completions.create(
-                    model=ROUTERAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"Текст страницы:\n{page_text}"}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.0,
-                    max_tokens=500
-                ),
-                timeout=60.0
-            )
-            
-            raw_json = response.choices[0].message.content
-            result = json.loads(raw_json)
-            
-            verdict = result.get("verdict", "DELETE")
-            reason = result.get("reason", "Без причины")
-            
-            if verdict == "KEEP":
-                await update_lead_status(lead_id, "approved")
-                kept_count += 1
-                logger.info(f"[ANALYST] Лид ID {lead_id} ОДОБРЕН. Причина: {reason}")
-            else:
-                await delete_lead(lead_id)
-                deleted_count += 1
-                logger.info(f"[ANALYST] Лид ID {lead_id} УДАЛЕН. Причина: {reason}")
+        success = False
+        for attempt in range(2):
+            try:
+                response = await asyncio.wait_for(
+                    ai_client.chat.completions.create(
+                        model=ROUTERAI_MODEL,
+                        messages=[
+                            {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
+                            {"role": "user", "content": f"Текст страницы:\n{page_text}"}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.0,
+                        max_tokens=500
+                    ),
+                    timeout=60.0
+                )
                 
-        except Exception as e:
-            logger.error(f"[ANALYST] Ошибка при анализе лида {lead_id}: {e}")
+                raw_json = response.choices[0].message.content
+                if not raw_json:
+                    raise ValueError("ИИ вернул пустоту")
+                    
+                result = json.loads(raw_json)
+                verdict = result.get("verdict", "DELETE")
+                reason = result.get("reason", "Без причины")
+                
+                if verdict == "KEEP":
+                    await update_lead_status(lead_id, "approved")
+                    kept_count += 1
+                    logger.info(f"[ANALYST] Лид ID {lead_id} ОДОБРЕН. Причина: {reason}")
+                else:
+                    await delete_lead(lead_id)
+                    deleted_count += 1
+                    logger.info(f"[ANALYST] Лид ID {lead_id} УДАЛЕН. Причина: {reason}")
+                
+                success = True
+                break
+                
+            except Exception as e:
+                logger.warning(f"[ANALYST] Попытка {attempt+1} для лида {lead_id} не удалась: {e}")
+                await asyncio.sleep(1)
+
+        if not success:
+            logger.error(f"[ANALYST] Не удалось проанализировать лид {lead_id} после 2 попыток.")
             await update_lead_status(lead_id, "error")
-            continue
 
     logger.info(f"[ANALYST] === РАБОТА ЗАВЕРШЕНА. Одобрено: {kept_count}, Удалено: {deleted_count} ===")
-    await _safe_send(bot, chat_id, f"✅ <b>Аналитик закончил работу!</b>\nОдобрено: {kept_count}\nУдалено мусора: {deleted_count}")
+    
+    
+    for aid in admin_ids:
+        await _safe_send(bot, aid, f"✅ <b>Аналитик закончил!</b>\nОдобрено: {kept_count}\nУдалено: {deleted_count}")
 
 # ==========================================
-# ЗАПУСК СКАУТЕРА И ТРИГГЕР ДЛЯ АНАЛИТИКА
+# ЗАПУСК СКАУТЕРА
 # ==========================================
 
 async def run_scout_agent(chat_id: int, bot: Bot):
     logger.info("[SCOUT] Запуск поиска...")
     last_save_time = time.time()
     
+    
+    admin_ids = await get_all_admin_ids()
+    
     try:
         async def _search_and_save():
             nonlocal last_save_time
-            
             try:
                 try:
                     response = await asyncio.wait_for(
@@ -324,7 +338,7 @@ async def run_scout_agent(chat_id: int, bot: Bot):
                             model=ROUTERAI_MODEL, 
                             messages=[
                                 {"role": "system", "content": SCOUT_SYSTEM_PROMPT},
-                                {"role": "user", "content": "Найди не менее 5 свежих анонсов от российских компаний. События должны быть в будущем."}
+                                {"role": "user", "content": "Найди не менее 5 свежих анонсов от российских компаний."}
                             ],
                             response_format={"type": "json_object"},
                             temperature=0.0,
@@ -335,7 +349,8 @@ async def run_scout_agent(chat_id: int, bot: Bot):
                     )
                 except asyncio.TimeoutError:
                     print("\n[!!!] ТАЙМАУТ ОТВЕТА ИИ (120 сек)\n")
-                    await _safe_send(bot, chat_id, "⚠️ ИИ не ответил за 2 минуты. Попробуйте позже.")
+                    for aid in admin_ids:
+                        await _safe_send(bot, aid, "⚠️ ИИ не ответил за 2 минуты. Попробуйте позже.")
                     return
                 
                 logger.info(f"[SCOUT] Ответ получен. Токенов: {response.usage.total_tokens}")
@@ -346,7 +361,8 @@ async def run_scout_agent(chat_id: int, bot: Bot):
                     
                 if not raw_content:
                     logger.warning("[SCOUT] Модель вернула пустой ответ.")
-                    await _safe_send(bot, chat_id, "⚠️ Модель не смогла сгенерировать ответ.")
+                    for aid in admin_ids:
+                        await _safe_send(bot, aid, "⚠️ Модель не смогла сгенерировать ответ.")
                     return
                     
                 logger.info(f"[SCOUT] Сырой ответ (первые 200 символов): {raw_content[:200]}...")
@@ -356,7 +372,8 @@ async def run_scout_agent(chat_id: int, bot: Bot):
                 findings = parsed_data.get("leads", [])
                 
                 if not findings:
-                    await _safe_send(bot, chat_id, "⚠️ ИИ не нашел подходящих событий (leads пуст).")
+                    for aid in admin_ids:
+                        await _safe_send(bot, aid, "⚠️ ИИ не нашел подходящих событий (leads пуст).")
                     return
                 
                 total_new_found = 0
@@ -390,24 +407,26 @@ async def run_scout_agent(chat_id: int, bot: Bot):
                         continue
                         
                 logger.info(f"[SCOUT] Итог. Новых: {total_new_found}")
-                
-                msg_text = f"✅ <b>Поиск Скаутера завершен!</b>\nСохранено новых лидов: <b>{total_new_found}</b>."
-                await _safe_send(bot, chat_id, msg_text)
+                for aid in admin_ids:
+                    await _safe_send(bot, aid, f"✅ <b>Поиск Скаутера завершен!</b>\nСохранено новых лидов: <b>{total_new_found}</b>.")
                 
             except Exception as e:
                 print(f"\n[!!!] КРИТИЧЕСКАЯ ОШИБКА ВНУТРИ _search_and_save: {e}\n")
                 logger.error(f"[SCOUT] Ошибка внутри _search_and_save: {e}", exc_info=True)
-                await _safe_send(bot, chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
+                for aid in admin_ids:
+                    await _safe_send(bot, aid, f"⚠️ Ошибка: {str(e)[:100]}")
             
         await asyncio.wait_for(_search_and_save(), timeout=180.0)
         
     except asyncio.TimeoutError:
         logger.error("[SCOUT] Общий таймаут поиска (3 минуты)!")
-        await _safe_send(bot, chat_id, "⚠️ Поиск занял слишком много времени (3 минуты).")
+        for aid in admin_ids:
+            await _safe_send(bot, aid, "⚠️ Поиск занял слишком много времени (3 минуты).")
     except Exception as e:
         print(f"\n[!!!] КРИТИЧЕСКАЯ ОШИБКА: {e}\n")
         logger.error(f"[SCOUT] Критическая ошибка: {e}", exc_info=True)
-        await _safe_send(bot, chat_id, "⚠️ Критическая ошибка при поиске.")
+        for aid in admin_ids:
+            await _safe_send(bot, aid, "⚠️ Критическая ошибка при поиске.")
     finally:
         logger.info("[SCOUT] Ожидание 10 секунд тишины перед запуском Аналитика...")
         await asyncio.sleep(10)
@@ -421,27 +440,32 @@ async def run_scout_agent(chat_id: int, bot: Bot):
 
 @router.callback_query(F.data == "start_search")
 async def cb_start_search(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     await call.answer("Поиск запущен! Ожидайте...", show_alert=True)
     await call.message.edit_text("🚀 <b>Поиск запущен!</b>\n\nСкаутер ищет лиды, затем Аналитик их проверяет...", reply_markup=back_kb())
     asyncio.create_task(run_scout_agent(call.message.chat.id, call.bot))
 
-# ==========================================
-# КОМАНДА /time
-# ==========================================
 @router.message(Command("time"))
 async def cmd_time(message: Message):
+    if not await is_admin(message.from_user.id):
+        await message.answer("У вас нет доступа к таймеру.")
+        return
+        
     if state.next_run_time is None:
-        await message.answer("⏳ Таймер еще не запущен. Бот только стартует...")
+        await message.answer("⏳ Таймер еще не запущен.")
         return
     now = datetime.now()
     remaining = state.next_run_time - now
     if remaining.total_seconds() <= 0:
-        await message.answer("🚀 Бот уже работает или скоро начнет!")
+        await message.answer("🚀 Бот уже работает!")
         return
     total_seconds = int(remaining.total_seconds())
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    await message.answer(f"⏳ До следующего запуска осталось: <b>{hours:02d}:{minutes:02d}:{seconds:02d}</b>")
+    await message.answer(f"⏳ До следующего запуска: <b>{hours:02d}:{minutes:02d}:{seconds:02d}</b>")
 
 @router.message()
 async def catch_all_messages(message: Message):

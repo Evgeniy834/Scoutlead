@@ -13,5 +13,7 @@ ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", "https://api.routerai.ru/v1")
 # Читаем модель из .env (если там пусто, ставим дефолтную 0731)
 ROUTERAI_MODEL = os.getenv("ROUTERAI_MODEL", "deepseek/deepseek-v4-flash-0731") 
 
+BOT_PASSWORD = os.getenv("BOT_PASSWORD", "131131")
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в .env")
