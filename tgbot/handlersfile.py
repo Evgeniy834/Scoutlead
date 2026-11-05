@@ -3,7 +3,7 @@ import asyncio
 import json
 import httpx
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from aiogram import Router, F, Bot
@@ -58,7 +58,6 @@ ANALYST_SYSTEM_PROMPT = f"""
 """
 
 WELCOME_TEXT = "👋 Привет, <b>{name}</b>!\n\nЯ — бот для мониторинга событий клиентов.\nВыберите действие на клавиатуре ниже:"
-
 
 class AuthStates(StatesGroup):
     waiting_for_password = State()
@@ -149,7 +148,7 @@ async def _fetch_page_text(url: str) -> str:
         return ""
 
 # ==========================================
-# ОСНОВНЫЕ ХЕНДЛЕРЫ 
+# ОСНОВНЫЕ ХЕНДЛЕРЫ
 # ==========================================
 
 @router.message(Command("start"))
@@ -173,16 +172,28 @@ async def process_password(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "manual")
 async def cb_manual(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     await call.message.edit_text("📖 <b>Краткий мануал</b>\n\n(Заполним позже)", reply_markup=back_kb())
     await call.answer()
 
 @router.callback_query(F.data == "back")
 async def cb_back(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     await call.message.edit_text(f"👋 <b>{call.from_user.full_name}</b>, вы в главном меню.", reply_markup=main_menu_kb())
     await call.answer()
 
 @router.callback_query(F.data == "results")
 async def cb_results(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     lead_id = await get_first_lead_id()
     if not lead_id:
         await call.message.edit_text("📋 <b>Результаты</b>\n\nБаза пуста.", reply_markup=back_kb())
@@ -194,6 +205,10 @@ async def cb_results(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("lead_next_"))
 async def cb_lead_next(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     current_id = int(call.data.split("_")[2])
     next_id = await get_next_lead_id(current_id)
     if next_id:
@@ -205,6 +220,10 @@ async def cb_lead_next(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("lead_prev_"))
 async def cb_lead_prev(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     current_id = int(call.data.split("_")[2])
     prev_id = await get_prev_lead_id(current_id)
     if prev_id:
@@ -216,6 +235,10 @@ async def cb_lead_prev(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("lead_view_"))
 async def cb_lead_view(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("У вас нет доступа.", show_alert=True)
+        return
+        
     current_id = int(call.data.split("_")[2])
     await delete_lead(current_id)
     await call.answer("✅ Удалено.", show_alert=False)
@@ -232,12 +255,11 @@ async def cb_lead_view(call: CallbackQuery):
             await call.message.edit_text("📋 <b>Результаты</b>\n\nВсе лиды просмотрены.", reply_markup=back_kb())
 
 # ==========================================
-# ЛОГИКА ВТОРОГО АГЕНТА 
+# ЛОГИКА ВТОРОГО АГЕНТА (АНАЛИТИК)
 # ==========================================
-async def run_analyst_agent(chat_id: int, bot: Bot):
+async def run_analyst_agent(bot: Bot):
     logger.info("[ANALYST] === ЗАПУСК ВТОРОГО АГЕНТА (АНАЛИТИК) ===")
     
-    # Отправляем уведомление всем админам из БД
     admin_ids = await get_all_admin_ids()
     for aid in admin_ids:
         await _safe_send(bot, aid, "🧹 <b>Аналитик приступил к работе!</b>")
@@ -313,7 +335,6 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
 
     logger.info(f"[ANALYST] === РАБОТА ЗАВЕРШЕНА. Одобрено: {kept_count}, Удалено: {deleted_count} ===")
     
-    
     for aid in admin_ids:
         await _safe_send(bot, aid, f"✅ <b>Аналитик закончил!</b>\nОдобрено: {kept_count}\nУдалено: {deleted_count}")
 
@@ -321,10 +342,10 @@ async def run_analyst_agent(chat_id: int, bot: Bot):
 # ЗАПУСК СКАУТЕРА
 # ==========================================
 
-async def run_scout_agent(chat_id: int, bot: Bot):
+async def run_scout_agent(bot: Bot):
     logger.info("[SCOUT] Запуск поиска...")
+    state.is_search_running = True
     last_save_time = time.time()
-    
     
     admin_ids = await get_all_admin_ids()
     
@@ -428,13 +449,14 @@ async def run_scout_agent(chat_id: int, bot: Bot):
         for aid in admin_ids:
             await _safe_send(bot, aid, "⚠️ Критическая ошибка при поиске.")
     finally:
+        state.is_search_running = False
         logger.info("[SCOUT] Ожидание 10 секунд тишины перед запуском Аналитика...")
         await asyncio.sleep(10)
         
         time_since_last_save = time.time() - last_save_time
         if time_since_last_save >= 10:
             logger.info(f"[SCOUT] Логируем таймаут ({time_since_last_save:.1f} сек без новых данных). Передаем управление Аналитику.")
-            await run_analyst_agent(chat_id, bot)
+            await run_analyst_agent(bot)
         else:
             logger.info(f"[SCOUT] С момента последнего сохранения прошло {time_since_last_save:.1f} сек (меньше 10).")
 
@@ -444,9 +466,28 @@ async def cb_start_search(call: CallbackQuery):
         await call.answer("У вас нет доступа.", show_alert=True)
         return
         
+    if state.is_search_running:
+        await call.answer("⏳ Поиск уже идет! Дождитесь его окончания.", show_alert=True)
+        return
+
+    now = datetime.now()
+    
+    # Проверка глобального 3-часового таймера принудительного запуска
+    if state.next_manual_run_time and state.next_manual_run_time > now:
+        remaining = state.next_manual_run_time - now
+        total_seconds = int(remaining.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        await call.answer(f"⏳ Бот уже был принудительно запущен. До следующего осталось: {time_str}", show_alert=True)
+        return
+        
+    # Устанавливаем следующий принудительный запуск через 3 часа
+    state.next_manual_run_time = now + timedelta(hours=3)
+    
     await call.answer("Поиск запущен! Ожидайте...", show_alert=True)
     await call.message.edit_text("🚀 <b>Поиск запущен!</b>\n\nСкаутер ищет лиды, затем Аналитик их проверяет...", reply_markup=back_kb())
-    asyncio.create_task(run_scout_agent(call.message.chat.id, call.bot))
+    asyncio.create_task(run_scout_agent(call.bot))
 
 @router.message(Command("time"))
 async def cmd_time(message: Message):

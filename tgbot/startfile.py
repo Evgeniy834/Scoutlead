@@ -14,7 +14,6 @@ from databasefile import init_db
 from handlersfile import router, run_scout_agent
 import state
 
-# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 os.makedirs("logs", exist_ok=True)
 log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 logging.basicConfig(
@@ -30,7 +29,6 @@ logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
 
-# ========== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ==========
 async def global_error_handler(event: types.ErrorEvent):
     logger.error("НЕОБРАБОТАННАЯ ОШИБКА: %s", event.exception, exc_info=event.exception)
     update = event.update
@@ -47,15 +45,11 @@ async def global_error_handler(event: types.ErrorEvent):
     return True
 
 
-# ========== ПЛАНИРОВЩИК (ЖДЕМ 5 МИНУТ) ==========
-async def scheduler_loop(bot: Bot, chat_id: int):
-    # Устанавливаем время ПЕРВОГО запуска на 5 минут вперед
-    state.next_run_time = datetime.datetime.now() + datetime.timedelta(minutes=5)
-    
-    print("\n⏳ Планировщик запущен. Ждем 5 минут до первого автоматического поиска...")
+async def scheduler_loop(bot: Bot):
+    state.next_run_time = datetime.datetime.now() + datetime.timedelta(hours=12)
+    print("\n⏳ Планировщик запущен. Ждем 12 часов до первого автоматического поиска...")
     
     while True:
-        # Ждем с обратным отсчетом
         while datetime.datetime.now() < state.next_run_time:
             remaining = state.next_run_time - datetime.datetime.now()
             total_seconds = int(remaining.total_seconds())
@@ -63,24 +57,15 @@ async def scheduler_loop(bot: Bot, chat_id: int):
                 total_seconds = 0
             hours, remainder = divmod(total_seconds, 3600)
             minutes, seconds = divmod(remainder, 60)
-            
-            # Выводим таймер в одну строку
             print(f"\r⏳ До следующего запуска: {hours:02d}:{minutes:02d}:{seconds:02d}", end="")
             await asyncio.sleep(1)
         
         print("\n🚀 Бот начал работу по расписанию...")
-        
-        # СРАЗУ ставим время следующего запуска (снова на 5 минут)
-        state.next_run_time = datetime.datetime.now() + datetime.timedelta(minutes=5)
-        
-        # Запускаем поиск в фоне
-        asyncio.create_task(run_scout_agent(chat_id, bot))
-        
-        # Небольшая пауза, чтобы таймер успел обновиться перед следующим циклом
+        state.next_run_time = datetime.datetime.now() + datetime.timedelta(hours=12)
+        asyncio.create_task(run_scout_agent(bot))
         await asyncio.sleep(1)
 
 
-# ========== ЗАПУСК ==========
 async def main():
     logger.info("Инициализация бота...")
     await init_db()
@@ -92,15 +77,8 @@ async def main():
 
     logger.info("Бот успешно запущен и готов к работе!")
 
-    # Принудительно делаем chat_id числом (лечит ошибку chat not found)
-    chat_id = int(ADMIN_IDS[0]) if ADMIN_IDS else None
-    
-    if chat_id:
-        asyncio.create_task(scheduler_loop(bot, chat_id))
-        await asyncio.sleep(1)
-        print("\n💡 ВАЖНО: Если вы видите ошибку 'chat not found', зайдите в бота и нажмите /start!")
-    else:
-        logger.warning("ADMIN_IDS не задан, автоматический запуск невозможен.")
+    asyncio.create_task(scheduler_loop(bot))
+    await asyncio.sleep(1)
 
     try:
         await dp.start_polling(bot)

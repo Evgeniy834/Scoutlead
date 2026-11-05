@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT DEFAULT 'manager',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
--- НОВАЯ ТАБЛИЦА ДЛЯ АДМИНОВ
 CREATE TABLE IF NOT EXISTS admins (
     user_id INTEGER PRIMARY KEY,
     username TEXT,
@@ -44,6 +43,9 @@ async def init_db():
         os.makedirs(db_dir, exist_ok=True)
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            # Защита от блокировок (database is locked)
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=5000;")
             await db.executescript(CREATE_TABLES_SQL)
             await db.commit()
     except Exception as e:
@@ -72,7 +74,6 @@ async def save_scout_finding(company_name: str, event_description: str, source_u
         logger.error("Ошибка БД в save_scout_finding: %s", e, exc_info=True)
         return False
 
-# --- ЛОГИКА ТОЛЬКО ДЛЯ ОДОБРЕННЫХ ЛИДОВ ---
 async def get_first_lead_id() -> int | None:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id FROM scout_findings WHERE status = 'approved' ORDER BY id DESC LIMIT 1") as cur:
@@ -125,25 +126,18 @@ async def update_lead_status(lead_id: int, status: str) -> bool:
         logger.error(f"Ошибка БД в update_lead_status: {e}")
         return False
 
-# ==========================================
-# НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С АДМИНАМИ
-# ==========================================
-
 async def is_admin(user_id: int) -> bool:
-    """Проверяет, есть ли пользователь в таблице админов."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,)) as cur:
             return await cur.fetchone() is not None
 
 async def add_admin(user_id: int, username: str | None):
-    """Добавляет пользователя в таблицу админов."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)", (user_id, username))
         await db.commit()
         logger.info(f"Новый админ добавлен в БД: {user_id} (@{username})")
 
 async def get_all_admin_ids() -> list[int]:
-    """Возвращает список всех ID админов из базы."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM admins") as cur:
             rows = await cur.fetchall()
