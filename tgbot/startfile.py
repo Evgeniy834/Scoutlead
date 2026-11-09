@@ -9,8 +9,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 
-from configfile import BOT_TOKEN, ADMIN_IDS
-from databasefile import init_db
+from configfile import BOT_TOKEN
+from databasefile import init_db, get_all_admin_ids
 from handlersfile import router, run_scout_agent
 import state
 
@@ -37,7 +37,10 @@ async def global_error_handler(event: types.ErrorEvent):
             await update.message.answer("⚠️ Произошла внутренняя ошибка.")
         except TelegramAPIError:
             pass
-    for admin_id in ADMIN_IDS:
+    
+    # Берем админов из БД (а не из .env)
+    admin_ids = await get_all_admin_ids()
+    for admin_id in admin_ids:
         try:
             await event.update.bot.send_message(admin_id, f"🚨 <b>Упал бот!</b>\n\n<code>{str(event.exception)[:1000]}</code>")
         except TelegramAPIError:
@@ -62,7 +65,13 @@ async def scheduler_loop(bot: Bot):
         
         print("\n🚀 Бот начал работу по расписанию...")
         state.next_run_time = datetime.datetime.now() + datetime.timedelta(hours=12)
-        asyncio.create_task(run_scout_agent(bot))
+        
+        # Защита от наложения с принудительным запуском
+        if not state.is_search_running:
+            asyncio.create_task(run_scout_agent(bot))
+        else:
+            print("⏳ Поиск уже идет (принудительный), пропускаем плановый запуск.")
+            
         await asyncio.sleep(1)
 
 

@@ -21,7 +21,7 @@ source venv/bin/activate  # Windows: .\venv\Scripts\activate
 pip install -r requirements.txt
  
 ===============================================================
-    Запуск на фоне + просмотор сесии/логов + остановка сессии
+Запуск на фоне + просмотор сесии/логов + остановка сессии
 ===============================================================
 nohup python startfile.py > bot_out.log 2>&1 &
 ps aux | grep startfile.py
