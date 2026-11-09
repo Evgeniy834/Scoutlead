@@ -432,13 +432,13 @@ async def cb_lead_prev(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("lead_view_"))
 async def cb_lead_view(call: CallbackQuery):
-    """НЕ удаляет лид, а помечает 'viewed' — чтобы Скаутер не находил его повторно."""
+    
     if not await is_admin(call.from_user.id):
         await call.answer("У вас нет доступа.", show_alert=True)
         return
         
     current_id = int(call.data.split("_")[2])
-    await update_lead_status(current_id, "viewed")  # <--- ВАЖНО: не delete, а status
+    await update_lead_status(current_id, "viewed")  
     await call.answer("✅ Просмотрено и скрыто.", show_alert=False)
     
     next_id = await get_next_lead_id(current_id)
@@ -484,7 +484,7 @@ async def run_analyst_agent(bot: Bot):
         page_text = await _fetch_page_text(url)
         if not page_text:
             logger.warning(f"[ANALYST] Не удалось прочитать страницу {url}. Помечаем как error.")
-            await update_lead_status(lead_id, "error")  # <--- не delete
+            await update_lead_status(lead_id, "error")  
             rejected_count += 1
             continue
 
@@ -644,7 +644,7 @@ async def run_scout_agent(bot: Bot):
                                 logger.warning(f"[SCOUT] Отсеян прошедший ивент: {company}")
                                 continue
 
-                        # 2. Проверка на мусорные URL (расширения, фиды, ленты)
+                        # 2. Проверка на мусорные URL
                         if _is_garbage_url(url):
                             logger.warning(f"[SCOUT] Отсеян мусорный URL: {company} ({url})")
                             skipped_garbage += 1
@@ -655,7 +655,7 @@ async def run_scout_agent(bot: Bot):
                             logger.warning(f"[SCOUT] Ссылка недоступна: {company} ({url})")
                             continue
 
-                        # 4. Сохранение (INSERT OR IGNORE — если URL уже в базе с любым статусом, пропустит)
+                        # 4. Сохранение 
                         saved = await save_scout_finding(
                             company_name=company,
                             event_description=item.get("event_description"),
